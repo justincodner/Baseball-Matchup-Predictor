@@ -64,7 +64,7 @@ class PitchSelectionAnalyzer:
         data = self.pitcher_data[pitcher_name]
         
         # Filter out missing values
-        data = data.dropna(subset=['release_speed', 'release_spin_rate', 'pitch_type'])
+        data = data.dropna(subset=['release_speed', 'release_spin_rate', 'pitch_type', 'pfx_x', 'pfx_z'])
         
         pitch_characteristics = {}
         
@@ -77,6 +77,10 @@ class PitchSelectionAnalyzer:
                     'speed_std': pitch_data['release_speed'].std(),
                     'spin_mean': pitch_data['release_spin_rate'].mean(),
                     'spin_std': pitch_data['release_spin_rate'].std(),
+                    'pfx_x_mean': pitch_data['pfx_x'].mean(),
+                    'pfx_x_std': pitch_data['pfx_x'].std(),
+                    'pfx_z_mean': pitch_data['pfx_z'].mean(),
+                    'pfx_z_std': pitch_data['pfx_z'].std(),
                     'count': len(pitch_data)
                 }
                 pitch_characteristics[pitch_type] = characteristics
@@ -84,7 +88,8 @@ class PitchSelectionAnalyzer:
         print(f"\n=== Pitch Characteristics for {pitcher_name} ===")
         for pitch_type, stats in pitch_characteristics.items():
             print(f"{pitch_type}: Speed {stats['speed_mean']:.1f}±{stats['speed_std']:.1f} mph, "
-                  f"Spin {stats['spin_mean']:.0f}±{stats['spin_std']:.0f} rpm (n={stats['count']})")
+                  f"Spin {stats['spin_mean']:.0f}±{stats['spin_std']:.0f} rpm (n={stats['count']}), \nX-Movement: {stats['pfx_x_mean']:.2f}±{stats['pfx_x_std']:.2f} in, "
+                  f"Z-Movement: {stats['pfx_z_mean']:.2f}±{stats['pfx_z_std']:.2f} in")
         
         return pitch_characteristics
     
@@ -226,7 +231,9 @@ class PitchSelectionAnalyzer:
         
         # 4. Count-based pitch selection heatmap
         count_pitch_data = data.groupby(['balls', 'strikes', 'pitch_type']).size().unstack(fill_value=0)
-        sns.heatmap(count_pitch_data, annot=True, fmt='d', cmap='YlOrRd', ax=axes[1, 1])
+        count_pitch_percent = count_pitch_data.div(count_pitch_data.sum(axis=1), axis=0) * 100
+        annot = count_pitch_data.astype(str) + "\n(" + count_pitch_percent.round(1).astype(str) + "%)"
+        sns.heatmap(count_pitch_data, annot=annot, fmt='', cmap='YlOrRd', ax=axes[1, 1])
         axes[1, 1].set_title('Pitch Selection by Count')
         axes[1, 1].set_xlabel('Pitch Type')
         axes[1, 1].set_ylabel('Count (Balls-Strikes)')
