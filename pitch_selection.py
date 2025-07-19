@@ -223,9 +223,6 @@ class PitchSelectionAnalyzer:
         axes[1, 0].legend()
         axes[1, 0].grid(True)
         
-        # # Set axis limits to capture all pitches (extended range)
-        # axes[1, 0].set_xlim(-25, 25)  # ±18 inches horizontal (extended)
-        # axes[1, 0].set_ylim(0, 100)   # 10-50 inches vertical (extended)
         
         # 4. Count-based pitch selection heatmap
         count_pitch_data = data.groupby(['balls', 'strikes', 'pitch_type']).size().unstack(fill_value=0)
