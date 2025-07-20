@@ -57,7 +57,7 @@ class PitchSelectionAnalyzer:
         return count_pitch_percentages
     
     def analyze_pitch_characteristics(self, pitcher_name):
-        """Analyze speed and spin rate distributions for each pitch type"""
+        """Analyze speed and spin rate distributions for each pitch type with correlations"""
         if pitcher_name not in self.pitcher_data:
             return None
             
@@ -72,11 +72,27 @@ class PitchSelectionAnalyzer:
             pitch_data = data[data['pitch_type'] == pitch_type]
             
             if len(pitch_data) > 10:  # Only analyze if we have enough data
+                # Calculate basic statistics
+                speed_mean = pitch_data['release_speed'].mean()
+                speed_std = pitch_data['release_speed'].std()
+                spin_mean = pitch_data['release_spin_rate'].mean()
+                spin_std = pitch_data['release_spin_rate'].std()
+                
+                # Calculate correlation between speed and spin
+                correlation = pitch_data['release_speed'].corr(pitch_data['release_spin_rate'])
+                
+                # Calculate conditional parameters for spin given speed
+                # spin_conditional_mean = spin_mean + correlation * (spin_std/speed_std) * (speed - speed_mean)
+                # spin_conditional_std = spin_std * sqrt(1 - correlation^2)
+                spin_conditional_std = spin_std * np.sqrt(1 - correlation**2) if not np.isnan(correlation) else spin_std
+                
                 characteristics = {
-                    'speed_mean': pitch_data['release_speed'].mean(),
-                    'speed_std': pitch_data['release_speed'].std(),
-                    'spin_mean': pitch_data['release_spin_rate'].mean(),
-                    'spin_std': pitch_data['release_spin_rate'].std(),
+                    'speed_mean': speed_mean,
+                    'speed_std': speed_std,
+                    'spin_mean': spin_mean,
+                    'spin_std': spin_std,
+                    'speed_spin_correlation': correlation,
+                    'spin_conditional_std': spin_conditional_std,
                     'pfx_x_mean': pitch_data['pfx_x'].mean(),
                     'pfx_x_std': pitch_data['pfx_x'].std(),
                     'pfx_z_mean': pitch_data['pfx_z'].mean(),
@@ -87,8 +103,9 @@ class PitchSelectionAnalyzer:
         
         print(f"\n=== Pitch Characteristics for {pitcher_name} ===")
         for pitch_type, stats in pitch_characteristics.items():
+            correlation_str = f"r={stats['speed_spin_correlation']:.3f}" if not np.isnan(stats['speed_spin_correlation']) else "r=N/A"
             print(f"{pitch_type}: Speed {stats['speed_mean']:.1f}±{stats['speed_std']:.1f} mph, "
-                  f"Spin {stats['spin_mean']:.0f}±{stats['spin_std']:.0f} rpm (n={stats['count']}), \nX-Movement: {stats['pfx_x_mean']:.2f}±{stats['pfx_x_std']:.2f} in, "
+                  f"Spin {stats['spin_mean']:.0f}±{stats['spin_std']:.0f} rpm ({correlation_str}) (n={stats['count']}), \nX-Movement: {stats['pfx_x_mean']:.2f}±{stats['pfx_x_std']:.2f} in, "
                   f"Z-Movement: {stats['pfx_z_mean']:.2f}±{stats['pfx_z_std']:.2f} in")
         
         return pitch_characteristics
@@ -130,6 +147,64 @@ class PitchSelectionAnalyzer:
         
         return location_patterns
     
+    def validate_speed_spin_correlation(self, pitcher_name, model, num_samples=1000):
+        """Validate the conditional probability approach by comparing generated vs actual distributions"""
+        if pitcher_name not in self.pitcher_data or model is None:
+            return None
+            
+        data = self.pitcher_data[pitcher_name]
+        validation_results = {}
+        
+        for pitch_type in model['pitch_characteristics'].keys():
+            pitch_data = data[data['pitch_type'] == pitch_type]
+            if len(pitch_data) < 10:
+                continue
+                
+            # Generate samples using the conditional probability model
+            generated_speeds = []
+            generated_spins = []
+            
+            char = model['pitch_characteristics'][pitch_type]
+            
+            for _ in range(num_samples):
+                # Generate speed first
+                speed = np.random.normal(char['speed_mean'], char['speed_std'])
+                
+                # Generate spin using conditional probability
+                if not np.isnan(char['speed_spin_correlation']) and char['speed_spin_correlation'] != 0:
+                    spin_conditional_mean = (char['spin_mean'] + 
+                                           char['speed_spin_correlation'] * 
+                                           (char['spin_std'] / char['speed_std']) * 
+                                           (speed - char['speed_mean']))
+                    spin = np.random.normal(spin_conditional_mean, char['spin_conditional_std'])
+                else:
+                    spin = np.random.normal(char['spin_mean'], char['spin_std'])
+                
+                generated_speeds.append(speed)
+                generated_spins.append(spin)
+            
+            # Calculate correlations
+            actual_correlation = pitch_data['release_speed'].corr(pitch_data['release_spin_rate'])
+            generated_correlation = np.corrcoef(generated_speeds, generated_spins)[0, 1]
+            
+            validation_results[pitch_type] = {
+                'actual_correlation': actual_correlation,
+                'generated_correlation': generated_correlation,
+                'correlation_error': abs(actual_correlation - generated_correlation),
+                'actual_speed_mean': pitch_data['release_speed'].mean(),
+                'generated_speed_mean': np.mean(generated_speeds),
+                'actual_spin_mean': pitch_data['release_spin_rate'].mean(),
+                'generated_spin_mean': np.mean(generated_spins)
+            }
+        
+        print(f"\n=== Speed-Spin Correlation Validation for {pitcher_name} ===")
+        for pitch_type, results in validation_results.items():
+            print(f"{pitch_type}: Actual r={results['actual_correlation']:.3f}, "
+                  f"Generated r={results['generated_correlation']:.3f}, "
+                  f"Error={results['correlation_error']:.3f}")
+        
+        return validation_results
+    
     def create_pitch_selection_model(self, pitcher_name):
         """Create a comprehensive pitch selection model"""
         count_analysis = self.analyze_pitch_types_by_count(pitcher_name)
@@ -169,9 +244,22 @@ class PitchSelectionAnalyzer:
                     char = model['pitch_characteristics'][pitch_type]
                     loc = model['location_patterns'][pitch_type]
                     
-                    # Generate speed and spin using normal distribution
+                    # Generate speed first using normal distribution
                     speed = np.random.normal(char['speed_mean'], char['speed_std'])
-                    spin = np.random.normal(char['spin_mean'], char['spin_std'])
+                    
+                    # Generate spin rate using conditional probability given the speed
+                    if not np.isnan(char['speed_spin_correlation']) and char['speed_spin_correlation'] != 0:
+                        # Calculate conditional mean for spin given speed
+                        spin_conditional_mean = (char['spin_mean'] + 
+                                               char['speed_spin_correlation'] * 
+                                               (char['spin_std'] / char['speed_std']) * 
+                                               (speed - char['speed_mean']))
+                        
+                        # Use conditional standard deviation
+                        spin = np.random.normal(spin_conditional_mean, char['spin_conditional_std'])
+                    else:
+                        # Fallback to independent selection if no correlation or insufficient data
+                        spin = np.random.normal(char['spin_mean'], char['spin_std'])
                     
                     # Generate location using normal distribution
                     x_loc = np.random.normal(loc['x_mean'], loc['x_std'])
@@ -229,14 +317,18 @@ class PitchSelectionAnalyzer:
         axes[1, 0].grid(True)
         
         
-        # 4. Count-based pitch selection heatmap
-        count_pitch_data = data.groupby(['balls', 'strikes', 'pitch_type']).size().unstack(fill_value=0)
-        count_pitch_percent = count_pitch_data.div(count_pitch_data.sum(axis=1), axis=0) * 100
-        annot = count_pitch_data.astype(str) + "\n(" + count_pitch_percent.round(1).astype(str) + "%)"
-        sns.heatmap(count_pitch_data, annot=annot, fmt='', cmap='YlOrRd', ax=axes[1, 1])
-        axes[1, 1].set_title('Pitch Selection by Count')
-        axes[1, 1].set_xlabel('Pitch Type')
-        axes[1, 1].set_ylabel('Count (Balls-Strikes)')
+        # 4. Speed vs Spin Rate scatter plot by pitch type
+        for pitch_type in data['pitch_type'].unique():
+            pitch_data = data[data['pitch_type'] == pitch_type]
+            if len(pitch_data) > 0:
+                axes[1, 1].scatter(pitch_data['release_speed'], pitch_data['release_spin_rate'], 
+                                  label=pitch_type, alpha=0.6, s=20)
+        
+        axes[1, 1].set_xlabel('Speed (mph)')
+        axes[1, 1].set_ylabel('Spin Rate (rpm)')
+        axes[1, 1].set_title('Speed vs Spin Rate by Pitch Type')
+        axes[1, 1].legend()
+        axes[1, 1].grid(True)
         
         plt.tight_layout()
         plt.savefig(f'{pitcher_name.replace(" ", "_")}_pitch_analysis.png', dpi=300, bbox_inches='tight')
@@ -269,6 +361,9 @@ def main():
             model = analyzer.create_pitch_selection_model(pitcher)
             
             if model:
+                # Validate the speed-spin correlation approach
+                validation_results = analyzer.validate_speed_spin_correlation(pitcher, model)
+                
                 # Generate some example predictions
                 print(f"\n=== Sample Predictions for {pitcher} ===")
                 test_counts = [(0, 0), (0, 1), (1, 0), (1, 1), (2, 0), (2, 1), (3, 0), (3, 1), (3, 2)]
