@@ -13,6 +13,7 @@ class PitchSelectionAnalyzer:
     def __init__(self):
         self.pitch_data = None
         self.pitcher_data = {}
+        self.spin_correlation_models = {}  # Store correlation models for each pitcher
         
     def get_pitcher_statcast_data(self, pitcher_name, start_date='2023-01-01', end_date='2023-12-31'):
         """Get Statcast data for a specific pitcher"""
@@ -109,6 +110,94 @@ class PitchSelectionAnalyzer:
                   f"Z-Movement: {stats['pfx_z_mean']:.2f}±{stats['pfx_z_std']:.2f} in")
         
         return pitch_characteristics
+    
+    def create_improved_spin_correlation_models(self, pitcher_name):
+        """Create improved statistical models for spin rate prediction using movement data"""
+        if pitcher_name not in self.pitcher_data:
+            return None
+            
+        data = self.pitcher_data[pitcher_name]
+        
+        # Filter out missing values
+        data = data.dropna(subset=['release_speed', 'release_spin_rate', 'pitch_type', 'pfx_x', 'pfx_z'])
+        
+        correlation_models = {}
+        
+        for pitch_type in data['pitch_type'].unique():
+            pitch_data = data[data['pitch_type'] == pitch_type]
+            
+            if len(pitch_data) > 20:  # Need enough data for analysis
+                # Calculate correlations with movement data
+                speed_spin_corr = pitch_data['release_speed'].corr(pitch_data['release_spin_rate'])
+                movement_x_spin_corr = pitch_data['pfx_x'].corr(pitch_data['release_spin_rate'])
+                movement_z_spin_corr = pitch_data['pfx_z'].corr(pitch_data['release_spin_rate'])
+                
+                # Calculate multiple regression coefficients (simplified)
+                # This is a statistical approach using correlations
+                model = {
+                    'speed_spin_correlation': speed_spin_corr,
+                    'movement_x_spin_correlation': movement_x_spin_corr,
+                    'movement_z_spin_correlation': movement_z_spin_corr,
+                    'spin_mean': pitch_data['release_spin_rate'].mean(),
+                    'spin_std': pitch_data['release_spin_rate'].std(),
+                    'speed_mean': pitch_data['release_speed'].mean(),
+                    'speed_std': pitch_data['release_speed'].std(),
+                    'pfx_x_mean': pitch_data['pfx_x'].mean(),
+                    'pfx_x_std': pitch_data['pfx_x'].std(),
+                    'pfx_z_mean': pitch_data['pfx_z'].mean(),
+                    'pfx_z_std': pitch_data['pfx_z'].std(),
+                    'sample_count': len(pitch_data)
+                }
+                
+                correlation_models[pitch_type] = model
+        
+        self.spin_correlation_models[pitcher_name] = correlation_models
+        
+        # Print model performance
+        print(f"\n=== Spin Correlation Models for {pitcher_name} ===")
+        for pitch_type, model in correlation_models.items():
+            print(f"{pitch_type}: Speed-Spin r={model['speed_spin_correlation']:.3f}, "
+                  f"X-Movement-Spin r={model['movement_x_spin_correlation']:.3f}, "
+                  f"Z-Movement-Spin r={model['movement_z_spin_correlation']:.3f} "
+                  f"(n={model['sample_count']})")
+        
+        return correlation_models
+    
+    def predict_spin_improved_statistical(self, pitcher_name, pitch_type, speed, pfx_x, pfx_z):
+        """Predict spin rate using improved statistical model with movement data"""
+        if (pitcher_name in self.spin_correlation_models and 
+            pitch_type in self.spin_correlation_models[pitcher_name]):
+            
+            model = self.spin_correlation_models[pitcher_name][pitch_type]
+            
+            # Calculate base spin from speed correlation
+            speed_contribution = (model['speed_spin_correlation'] * 
+                                (model['spin_std'] / model['speed_std']) * 
+                                (speed - model['speed_mean']))
+            
+            # Add movement contributions
+            movement_x_contribution = (model['movement_x_spin_correlation'] * 
+                                     (model['spin_std'] / model['pfx_x_std']) * 
+                                     (pfx_x - model['pfx_x_mean']))
+            
+            movement_z_contribution = (model['movement_z_spin_correlation'] * 
+                                     (model['spin_std'] / model['pfx_z_std']) * 
+                                     (pfx_z - model['pfx_z_mean']))
+            
+            # Calculate predicted spin
+            predicted_spin = (model['spin_mean'] + 
+                            speed_contribution + 
+                            movement_x_contribution + 
+                            movement_z_contribution)
+            
+            # Add realistic noise
+            noise = np.random.normal(0, model['spin_std'] * 0.1)
+            predicted_spin += noise
+            
+            return predicted_spin
+        
+        # Fallback to original conditional probability method
+        return None
     
     def analyze_pitch_locations(self, pitcher_name):
         """Analyze pitch location patterns"""
@@ -247,19 +336,27 @@ class PitchSelectionAnalyzer:
                     # Generate speed first using normal distribution
                     speed = np.random.normal(char['speed_mean'], char['speed_std'])
                     
-                    # Generate spin rate using conditional probability given the speed
-                    if not np.isnan(char['speed_spin_correlation']) and char['speed_spin_correlation'] != 0:
-                        # Calculate conditional mean for spin given speed
-                        spin_conditional_mean = (char['spin_mean'] + 
-                                               char['speed_spin_correlation'] * 
-                                               (char['spin_std'] / char['speed_std']) * 
-                                               (speed - char['speed_mean']))
-                        
-                        # Use conditional standard deviation
-                        spin = np.random.normal(spin_conditional_mean, char['spin_conditional_std'])
-                    else:
-                        # Fallback to independent selection if no correlation or insufficient data
-                        spin = np.random.normal(char['spin_mean'], char['spin_std'])
+                    # Generate movement using normal distribution
+                    pfx_x = np.random.normal(char['pfx_x_mean'], char['pfx_x_std'])
+                    pfx_z = np.random.normal(char['pfx_z_mean'], char['pfx_z_std'])
+                    
+                    # Try to use improved statistical model for spin prediction
+                    spin = self.predict_spin_improved_statistical(model['pitcher_name'], pitch_type, speed, pfx_x, pfx_z)
+                    
+                    # Fallback to conditional probability if statistical model not available
+                    if spin is None:
+                        if not np.isnan(char['speed_spin_correlation']) and char['speed_spin_correlation'] != 0:
+                            # Calculate conditional mean for spin given speed
+                            spin_conditional_mean = (char['spin_mean'] + 
+                                                   char['speed_spin_correlation'] * 
+                                                   (char['spin_std'] / char['speed_std']) * 
+                                                   (speed - char['speed_mean']))
+                            
+                            # Use conditional standard deviation
+                            spin = np.random.normal(spin_conditional_mean, char['spin_conditional_std'])
+                        else:
+                            # Fallback to independent selection if no correlation or insufficient data
+                            spin = np.random.normal(char['spin_mean'], char['spin_std'])
                     
                     # Generate location using normal distribution
                     x_loc = np.random.normal(loc['x_mean'], loc['x_std'])
@@ -361,6 +458,9 @@ def main():
             model = analyzer.create_pitch_selection_model(pitcher)
             
             if model:
+                # Create improved statistical models for spin prediction
+                spin_models = analyzer.create_improved_spin_correlation_models(pitcher)
+                
                 # Validate the speed-spin correlation approach
                 validation_results = analyzer.validate_speed_spin_correlation(pitcher, model)
                 
