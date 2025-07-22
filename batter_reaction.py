@@ -18,8 +18,7 @@ class BatterReactionModel:
         self.data_cache = {}
         self.feature_columns = [
             'pitch_type', 'release_speed', 'release_spin_rate',
-            'plate_x', 'plate_z', 'balls', 'strikes',
-            'batter_hand', 'pitcher_hand', 'movement_mag'
+            'balls', 'strikes', 'batter_hand', 'pitcher_hand', 'movement_mag', 'zone'
         ]
         self.outcome_categories = [
             'ball', 'called_strike', 'swinging_strike', 'foul', 'single',
@@ -63,7 +62,7 @@ class BatterReactionModel:
             'field_error': 'field_error',
             'fielders_choice_error': 'field_error',
         }
-        df['outcome'] = df['description'].map(outcome_map)
+        df['outcome'] = df['events'].fillna(df['description']).map(outcome_map)
         df = df[df['outcome'].isin(self.outcome_categories)]
         # Map batter_hand and pitcher_hand if not present
         if 'batter_hand' not in df.columns and 'stand' in df.columns:
@@ -74,9 +73,9 @@ class BatterReactionModel:
         required = ['pitch_type', 'release_speed', 'release_spin_rate', 'plate_x', 'plate_z',
                     'balls', 'strikes', 'batter_hand', 'pitcher_hand']
         df = df.dropna(subset=required)
-        # Convert location from feet to inches for compatibility, then back to feet
         df['plate_x'] = df['plate_x'].astype(float)
         df['plate_z'] = df['plate_z'].astype(float)
+        df['zone'] = df.apply(lambda row: self.zones(row['plate_x'], row['plate_z']), axis=1)
         # Derived features
         df['movement_mag'] = np.sqrt(df.get('pfx_x', 0)**2 + df.get('pfx_z', 0)**2)
         # Only keep necessary columns
@@ -87,10 +86,10 @@ class BatterReactionModel:
     def _build_preprocessor(self, df):
         """Builds a sklearn ColumnTransformer for numeric/categorical features."""
         numeric_features = [
-            'release_speed', 'release_spin_rate', 'plate_x', 'plate_z',
+            'release_speed', 'release_spin_rate',
             'balls', 'strikes', 'movement_mag'
         ]
-        categorical_features = ['pitch_type', 'batter_hand', 'pitcher_hand']
+        categorical_features = ['pitch_type', 'batter_hand', 'pitcher_hand', 'zone']
         numeric_transformer = StandardScaler()
         categorical_transformer = OneHotEncoder(handle_unknown='ignore')
         preprocessor = ColumnTransformer([
@@ -119,11 +118,13 @@ class BatterReactionModel:
 
     def predict_reaction(self, pitch_dict):
         """Predicts outcome probabilities for a given pitch/context dict."""
+        if 'zone' not in pitch_dict and 'plate_x' in pitch_dict and 'plate_z' in pitch_dict:
+            pitch_dict['zone'] = self.zones(pitch_dict['plate_x'], pitch_dict['plate_z'])
         input_df = pd.DataFrame([{**pitch_dict}])
-        if 'plate_x' in input_df:
-            input_df['plate_x'] = input_df['plate_x'] / 12.0
-        if 'plate_z' in input_df:
-            input_df['plate_z'] = input_df['plate_z'] / 12.0
+        # if 'plate_x' in input_df:
+        #     input_df['plate_x'] = input_df['plate_x'] / 12.0
+        # if 'plate_z' in input_df:
+        #     input_df['plate_z'] = input_df['plate_z'] / 12.0
         input_df['movement_mag'] = np.sqrt(input_df.get('pfx_x', 0)**2 + input_df.get('pfx_z', 0)**2)
         for col in self.feature_columns:
             if col not in input_df:
@@ -135,6 +136,35 @@ class BatterReactionModel:
             cat = self.label_encoder.inverse_transform([idx])[0]
             out_dict[cat] = float(prob)
         return out_dict
+
+    def zones(self, x, z):
+        # All boundaries now in feet
+        # Horizontal: -8.5in to 8.5in = -0.708ft to 0.708ft
+        # Vertical: 18in to 36in = 1.5ft to 3.0ft
+        if x < -0.708 or x > 0.708 or z < 1.5 or z > 3.0:
+            return 0
+        elif 2.5 <= z <= 3.0:
+            if -0.708 <= x < -0.236:
+                return 1
+            elif -0.236 <= x < 0.236:
+                return 2
+            elif 0.236 <= x <= 0.708:
+                return 3
+        elif 2.0 <= z < 2.5:
+            if -0.708 <= x < -0.236:
+                return 4
+            elif -0.236 <= x < 0.236:
+                return 5
+            elif 0.236 <= x <= 0.708:
+                return 6
+        elif 1.5 <= z < 2.0:
+            if -0.708 <= x < -0.236:
+                return 7
+            elif -0.236 <= x < 0.236:
+                return 8
+            elif 0.236 <= x <= 0.708:
+                return 9
+        return 0
 
     def save(self, path):
         """Save the model, encoder, and preprocessor to disk."""
