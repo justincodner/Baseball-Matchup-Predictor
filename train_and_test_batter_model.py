@@ -6,8 +6,8 @@ if __name__ == "__main__":
     model = BatterReactionModel()
     
     # 2. Load data for Aaron Judge (2023)
-    print("Loading data for Michael Brantley (2021)...")
-    df = model.load_batter_data('Michael Brantley', '2021-01-01', '2021-12-31')
+    print("Loading data for Aaron Judge (2024)...")
+    df = model.load_batter_data('Aaron Judge', '2024-01-01', '2024-12-31')
     print(f"Loaded {len(df)} pitches.")
     
     # 3. Preprocess and filter
