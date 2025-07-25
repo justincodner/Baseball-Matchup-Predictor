@@ -8,6 +8,10 @@ import matplotlib.pyplot as plt
 from pybaseball import statcast, playerid_lookup, statcast_pitcher
 from scipy import stats
 import seaborn as sns
+from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.preprocessing import OneHotEncoder, LabelEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
 
 class PitchSelectionAnalyzer:
     def __init__(self):
@@ -37,6 +41,123 @@ class PitchSelectionAnalyzer:
         else:
             print(f"No data found for {pitcher_name}")
             return None
+    
+    def build_pitch_sequence_dataframe(self, pitcher_name):
+        """Build a pitch sequence dataframe for ML modeling."""
+        if pitcher_name not in self.pitcher_data:
+            return None
+
+        data = self.pitcher_data[pitcher_name].copy()
+        # Sort by game and at-bat and pitch number to ensure correct sequence
+        data = data.sort_values(['game_pk', 'at_bat_number', 'pitch_number'])
+
+        # Add previous pitch type (shifted within each at-bat)
+        data['previous_pitch_type'] = data.groupby(['game_pk', 'at_bat_number'])['pitch_type'].shift(1)
+        data['previous_pitch_type'] = data['previous_pitch_type'].fillna('None')
+        data['pitch_number_in_at_bat'] = data.groupby(['game_pk', 'at_bat_number']).cumcount() + 1
+
+        # Add inning_topbot (categorical)
+        if 'inning_topbot' in data.columns:
+            data['inning_topbot'] = data['inning_topbot'].fillna('Unknown')
+        else:
+            data['inning_topbot'] = 'Unknown'
+
+        # Add score_differential (bat_score - fld_score)
+        if 'bat_score' in data.columns and 'fld_score' in data.columns:
+            data['score_differential'] = data['bat_score'].fillna(0) - data['fld_score'].fillna(0)
+        else:
+            data['score_differential'] = 0
+
+        # Add count_str (e.g., '2-1')
+        data['count_str'] = data['balls'].astype(str) + '-' + data['strikes'].astype(str)
+
+        # Add home_team and away_team
+        if 'home_team' in data.columns:
+            data['home_team'] = data['home_team'].fillna('Unknown')
+        else:
+            data['home_team'] = 'Unknown'
+        if 'away_team' in data.columns:
+            data['away_team'] = data['away_team'].fillna('Unknown')
+        else:
+            data['away_team'] = 'Unknown'
+
+        # Add batter (batter ID)
+        if 'batter' in data.columns:
+            data['batter'] = data['batter'].fillna(0)
+        else:
+            data['batter'] = 0
+
+        # Add previous_pitch_result and previous_pitch_speed (engineered features)
+        if 'description' in data.columns:
+            data['previous_pitch_result'] = data.groupby(['game_pk', 'at_bat_number'])['description'].shift(1)
+            data['previous_pitch_result'] = data['previous_pitch_result'].fillna('Unknown')
+        else:
+            data['previous_pitch_result'] = 'Unknown'
+        if 'release_speed' in data.columns:
+            data['previous_pitch_speed'] = data.groupby(['game_pk', 'at_bat_number'])['release_speed'].shift(1)
+            data['previous_pitch_speed'] = data['previous_pitch_speed'].fillna(0)
+        else:
+            data['previous_pitch_speed'] = 0
+
+        # Define optional features and fill missing values
+        optional_nums = ['n_through_order_pitcher', 'n_prior_pa_for_batter', 'previous_pitch_speed', 'on_1b', 'on_2b', 'on_3b', 'score_differential', 'outs_when_up']
+        optional_categorical = ['previous_pitch_result', 'batter_team', 'pitcher_team', 'inning_topbot', 'home_team', 'away_team', 'count_str']
+        for col in optional_nums:
+            if col in data.columns:
+                data[col] = data[col].fillna(0)
+        for col in optional_categorical:
+            if col in data.columns:
+                data[col] = data[col].fillna('Unknown')
+        if 'inning' in data.columns:
+            data['inning'] = data['inning'].fillna(0).astype(int)
+
+        # Map batter/pitcher handedness if needed
+        if 'batter_hand' not in data.columns and 'stand' in data.columns:
+            data['batter_hand'] = data['stand']
+        if 'pitcher_hand' not in data.columns and 'p_throws' in data.columns:
+            data['pitcher_hand'] = data['p_throws']
+
+        # Drop rows with missing required features
+        df = data.dropna(subset=['balls', 'strikes', 'batter_hand', 'pitcher_hand', 'pitch_type'])
+
+        # Define all possible features (including new ones)
+        all_possible_features = [
+            'balls', 'strikes', 'batter_hand', 'pitcher_hand', 'previous_pitch_type', 
+            'pitch_number_in_at_bat', 'pitch_type', 'inning', 'outs_when_up', 
+            'on_1b', 'on_2b', 'on_3b', 'score_differential', 'batter_team', 'pitcher_team',
+            'n_through_order_pitcher', 'n_prior_pa_for_batter', 'previous_pitch_result', 'previous_pitch_speed',
+            'inning_topbot', 'home_team', 'away_team', 'count_str', 'batter'
+        ]
+        
+        # Only keep features that actually exist in the DataFrame
+        available_features = [col for col in all_possible_features if col in df.columns]
+        
+        # Ensure we have the target column (pitch_type)
+        if 'pitch_type' not in available_features:
+            print("Warning: pitch_type not found in DataFrame")
+            return None
+            
+        # Only keep the columns you want
+        df = df[available_features]
+
+        # Group rare pitch types into 'Other'
+        pitch_type_counts = df['pitch_type'].value_counts()
+        rare_types = pitch_type_counts[pitch_type_counts < 20].index  # You can adjust the threshold
+        df['pitch_type'] = df['pitch_type'].apply(lambda x: 'Other' if x in rare_types else x)
+
+        def group_pitch_type(pt):
+            if pt in ['FF', 'FC', 'FT', 'SI', 'SF']:
+                return 'Fastball'
+            elif pt in ['SL', 'CU', 'KC']:
+                return 'Breaking'
+            elif pt in ['CH', 'FS']:
+                return 'Offspeed'
+            else:
+                return 'Other'
+
+        df['pitch_type_grouped'] = df['pitch_type'].apply(group_pitch_type)
+
+        return df
     
     def analyze_pitch_types_by_count(self, pitcher_name):
         """Analyze pitch type selection based on count"""
@@ -441,51 +562,50 @@ def main():
     analyzer = PitchSelectionAnalyzer()
     
     # Example pitchers to analyze
-    pitchers = [
-        "Gerrit Cole",
-        "Jacob deGrom", 
-        "Max Scherzer"
-    ]
-    
+    pitchers = ["Gerrit Cole", "Jacob deGrom", "Max Scherzer", "Shohei Ohtani", "Spencer Strider"]
+    all_data = []
     for pitcher in pitchers:
-        print(f"\n{'='*20} {pitcher} {'='*20}")
+        data = analyzer.get_pitcher_statcast_data(pitcher, '2021-01-01', '2024-12-31')
+        if data is not None:
+            df = analyzer.build_pitch_sequence_dataframe(pitcher)
+            if df is not None:
+                all_data.append(df)
+    if all_data:
+        df = pd.concat(all_data, ignore_index=True)
+
+    if df is not None:
+        # Create pitch selection model
+        model = analyzer.create_pitch_selection_model(pitchers[0]) # Use the first pitcher for model creation
         
-        # Get pitcher data
-        pitcher_data = analyzer.get_pitcher_statcast_data(pitcher, '2023-01-01', '2023-12-31')
-        
-        if pitcher_data is not None:
-            # Create pitch selection model
-            model = analyzer.create_pitch_selection_model(pitcher)
+        if model:
+            # Create improved statistical models for spin prediction
+            spin_models = analyzer.create_improved_spin_correlation_models(pitchers[0])
             
-            if model:
-                # Create improved statistical models for spin prediction
-                spin_models = analyzer.create_improved_spin_correlation_models(pitcher)
-                
-                # Validate the speed-spin correlation approach
-                validation_results = analyzer.validate_speed_spin_correlation(pitcher, model)
-                
-                # Generate some example predictions
-                print(f"\n=== Sample Predictions for {pitcher} ===")
-                test_counts = [(0, 0), (0, 1), (1, 0), (1, 1), (2, 0), (2, 1), (3, 0), (3, 1), (3, 2)]
-                
-                for balls, strikes in test_counts:
-                    prediction = analyzer.predict_pitch(model, balls, strikes)
-                    if prediction:
-                        print(f"Count {balls}-{strikes}: {prediction['pitch_type']} at {prediction['speed']:.1f} mph, "
-                              f"spin {prediction['spin_rate']:.0f} rpm, "
-                              f"location ({prediction['location_x']:.1f}, {prediction['location_z']:.1f}) inches")
-                
-                # Create visualizations
-                analyzer.visualize_pitch_selection(pitcher)
-                
-                # Save model data
-                model_df = pd.DataFrame({
-                    'pitcher': [pitcher],
-                    'pitch_types': [list(model['pitch_characteristics'].keys())],
-                    'total_pitches': [len(pitcher_data)]
-                })
-                model_df.to_csv(f'{pitcher.replace(" ", "_")}_pitch_model.csv', index=False)
-                print(f"Model data saved to '{pitcher.replace(' ', '_')}_pitch_model.csv'")
+            # Validate the speed-spin correlation approach
+            validation_results = analyzer.validate_speed_spin_correlation(pitchers[0], model)
+            
+            # Generate some example predictions
+            print(f"\n=== Sample Predictions for {pitchers[0]} ===")
+            test_counts = [(0, 0), (0, 1), (1, 0), (1, 1), (2, 0), (2, 1), (3, 0), (3, 1), (3, 2)]
+            
+            for balls, strikes in test_counts:
+                prediction = analyzer.predict_pitch(model, balls, strikes)
+                if prediction:
+                    print(f"Count {balls}-{strikes}: {prediction['pitch_type']} at {prediction['speed']:.1f} mph, "
+                          f"spin {prediction['spin_rate']:.0f} rpm, "
+                          f"location ({prediction['location_x']:.1f}, {prediction['location_z']:.1f}) inches")
+            
+            # Create visualizations
+            analyzer.visualize_pitch_selection(pitchers[0])
+            
+            # Save model data
+            model_df = pd.DataFrame({
+                'pitcher': [pitchers[0]],
+                'pitch_types': [list(model['pitch_characteristics'].keys())],
+                'total_pitches': [len(df)]
+            })
+            model_df.to_csv(f'{pitchers[0].replace(" ", "_")}_pitch_model.csv', index=False)
+            print(f"Model data saved to '{pitchers[0].replace(' ', '_')}_pitch_model.csv'")
 
 if __name__ == "__main__":
     main() 
